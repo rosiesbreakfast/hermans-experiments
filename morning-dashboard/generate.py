@@ -6,20 +6,21 @@ Combines weather, crypto prices, transport disruptions, and news.
 
 import json
 import os
-import re
-import subprocess
 import sys
 import urllib.request
 import urllib.error
 from datetime import datetime
 
+# Add transport module path
+_transport_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+if _transport_dir not in sys.path:
+    sys.path.insert(0, _transport_dir)
 
-def sh(cmd, timeout=30):
-    try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-        return r.stdout.strip()
-    except:
-        return ""
+try:
+    from transport import check_transport
+    HAS_TRANSPORT = True
+except ImportError:
+    HAS_TRANSPORT = False
 
 
 def fetch(url, timeout=15):
@@ -87,67 +88,17 @@ def get_crypto():
 # ─── Transport (Frankston Line / Cheltenham) ──────────────────────────────
 
 def get_transport():
-    """Check Frankston line and Cheltenham station for disruptions.
-
-    Tries multiple sources in order of reliability:
-    1. Metro Trains WordPress REST API (pages for service updates)
-    2. Metro Trains homepage HTML parsing
-    3. Fallback: graceful unknown
-    """
-    disruptions = {"frankston_line": [], "services": []}
-    now = datetime.now()
-    is_weekend = now.weekday() >= 5
-
-    # Attempt 1: Metro Trains API or homepage
-    html = fetch("https://www.metrotrains.com.au/")
-
-    if html:
-        # Search for any line status indicators
-        # The metro homepage has elements like:
-        # <div class="mtm-line-status" data-line="frankston">...</div>
-
-        # Look for interruption/planned works patterns
-        lines_found = re.findall(
-            r'(?:Frankston|Cranbourne|Pakenham)\s*(?:Line|line)?\s*[-–—]\s*([^<.]{10,200})',
-            html, re.IGNORECASE
-        )
-        for line in lines_found:
-            text = line.strip()
-            if len(text) > 15:
-                disruptions["frankston_line"].append(text[:150])
-
-        # Look for service status indicators
-        status_patterns = re.findall(
-            r'(?:major|minor|delay|suspend|cancel|planned|bus|replacement)',
-            html, re.IGNORECASE
-        )
-        if status_patterns:
-            unique_statuses = list(set(s.lower() for s in status_patterns))
-            if any(w in html.lower() for w in ["suspend", "major", "bus replacement"]):
-                disruptions["status"] = "major_disruption"
-            elif any(w in html.lower() for w in ["minor", "delay"]):
-                disruptions["status"] = "minor_delays"
-            elif any(w in html.lower() for w in ["planned"]):
-                disruptions["status"] = "planned_works"
-            else:
-                disruptions["status"] = "normal"
-        else:
-            disruptions["status"] = "normal"
-    else:
-        disruptions["status"] = "unknown"
-
-    # Default Cheltenham info
-    disruptions["cheltenham"] = {
-        "station": "Cheltenham",
-        "zone": "2",
-        "lines": ["Frankston"],
+    """Get Frankston line status from PTV API + Twitter."""
+    if HAS_TRANSPORT:
+        return check_transport()
+    return {
+        "status": "unknown",
+        "disruptions": [],
+        "sources_used": [],
+        "note": "Transport module not loaded",
+        "timestamp": datetime.now().isoformat(),
+        "station": {"name": "Cheltenham", "zone": "2", "line": "Frankston"},
     }
-
-    # Weekend note
-    if is_weekend:
-        disruptions["note"] = "Weekend — check for planned works"
-
-    return disruptions
 
 
 # ─── News ──────────────────────────────────────────────────────────────────
@@ -190,11 +141,16 @@ def pct(v):
 
 
 def transport_html(t):
+    """Render transport status to HTML."""
     status = t.get("status", "unknown")
-    line_issues = t.get("frankston_line", [])
+    disruptions = t.get("disruptions", [])
+    sources = t.get("sources_used", [])
+    note = t.get("note", "")
+    station = t.get("station", {})
+    sources_str = ", ".join(sources) if sources else "none"
 
     if status == "normal":
-        return '<div class="transport-ok">✅ Frankston Line —正常运行 (Normal service)</div>'
+        badge = '<span class="transport-badge" style="background:rgba(100,255,218,0.1);color:var(--green)">✅ Normal</span>'
     elif status == "major_disruption":
         badge = '<span class="transport-badge transport-bad">⚠ Major Disruption</span>'
     elif status == "minor_delays":
@@ -202,22 +158,31 @@ def transport_html(t):
     elif status == "planned_works":
         badge = '<span class="transport-badge transport-info"> Planned Works</span>'
     else:
-        badge = '<span class="transport-badge"> Unknown</span>'
+        badge = '<span class="transport-badge" style="color:var(--dim)"> Unknown</span>'
 
-    lines_html = ""
-    if line_issues:
-        for issue in line_issues[:3]:
-            lines_html += f'<div class="transport-issue">{issue}</div>'
+    items_html = ""
+    if disruptions:
+        for d in disruptions[:5]:
+            text = d.get("text", d.get("title", ""))
+            sev = d.get("severity", "info")
+            icon = "⚠️" if sev == "major" else ("" if sev == "minor" else "")
+            items_html += f'<div class="transport-issue">{icon} {text[:200]}</div>'
 
-    note_html = f'<div class="transport-note">{t.get("note", "")}</div>' if t.get("note") else ""
+    note_html = f'<div class="transport-note">{note}</div>' if note else ""
+    source_html = f'<div class="transport-meta">Sources: {sources_str}</div>' if sources else ""
+
+    station_name = station.get("name", "Cheltenham")
+    station_zone = station.get("zone", "2")
+    station_line = station.get("line", "Frankston")
 
     return f"""
       <div style="margin-bottom:8px">
-        <span style="font-weight:600">Frankston Line</span> {badge}
+        <span style="font-weight:600">{station_line} Line</span> {badge}
       </div>
-      {lines_html}
-      <div class="transport-detail">Cheltenham Station · Zone 2 · Frankston Line</div>
+      {items_html}
+      <div class="transport-detail">{station_name} Station · Zone {station_zone} · {station_line} Line</div>
       {note_html}
+      {source_html}
     """
 
 
@@ -359,6 +324,7 @@ def generate_html():
   .transport-issue {{ font-size:13px; color:var(--amber); padding:4px 0; }}
   .transport-detail {{ font-size:12px; color:var(--dim); margin-top:8px; }}
   .transport-note {{ font-size:11px; color:var(--slate); margin-top:4px; font-style:italic; }}
+  .transport-meta {{ font-size:10px; color:var(--dim); margin-top:6px; opacity:0.6; }}
 
   /* News */
   .news-item {{ display:flex; align-items:flex-start; gap:10px; padding:10px 0; border-bottom:1px solid rgba(255,255,255,0.05); text-decoration:none; color:var(--text); transition:opacity 0.15s; }}
