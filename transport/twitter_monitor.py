@@ -235,8 +235,11 @@ if __name__ == "__main__":
     tweets = parse_tweets(data)
 
     if not tweets:
-        print("No tweets fetched. Is xurl authenticated?")
-        print("Run: xurl auth status")
+        if "--json" in sys.argv:
+            print(json.dumps({"error": "xurl not authenticated", "handle": METRO_HANDLE, "frankston_line": "unknown"}))
+        else:
+            print("No tweets fetched. Is xurl authenticated?")
+            print("Run: xurl auth status")
         sys.exit(1)
 
     report = generate_report(tweets)
